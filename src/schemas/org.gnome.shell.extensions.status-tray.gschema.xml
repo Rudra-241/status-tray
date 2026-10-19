@@ -126,10 +126,11 @@
       <choices>
         <choice value="menu"/>
         <choice value="strip"/>
+        <choice value="grid"/>
       </choices>
       <default>'menu'</default>
       <summary>Overflow mode</summary>
-      <description>How overflowed tray items are shown. 'menu' lists them in the overflow button's popup menu. 'strip' puts them in a strip beside a chevron button, which slides the strip out in the panel and back again. A strip holding more icons than overflow-strip-width scrolls.</description>
+      <description>How overflowed tray items are shown. 'menu' lists them in the overflow button's popup menu. 'strip' puts them in a strip beside a chevron button, which slides the strip out in the panel and back again. A strip holding more icons than overflow-strip-width scrolls. 'grid' shows them as a grid of icons in the overflow button's popup; hovering an icon shows the app's name, and right clicking it shows the app's menu below the grid.</description>
     </key>
 
     <key name="overflow-strip-width" type="i">

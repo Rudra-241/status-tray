@@ -19,7 +19,7 @@ A GNOME Shell extension that brings back the system tray for applications using 
 - **Keyboard Shortcut** - Optionally open and focus the tray menu without a pointer
 - **Highly Customizable** - Per-app icon overrides, effects, and ordering
 - **Drag & Drop Reordering** - Arrange tray icons in your preferred order
-- **Panel Overflow** - Optionally collapse extra icons into a menu, or a strip that slides out in the panel
+- **Panel Overflow** - Optionally collapse extra icons into a menu, a strip that slides out in the panel, or a grid of icons like the Windows tray
 - **Live Updates** - All changes apply instantly without restart
 
 ## Compatibility

@@ -4,6 +4,17 @@ All notable changes to Status Tray will be documented in this file.
 
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+- A third overflow mode, Icon grid. The overflow button opens a grid of the extra tray icons, like the Windows notification area. Resting the pointer on an icon shows the app's name, and right clicking it opens the app's menu in a popup of its own at the pointer, over the grid. Choosing an item closes both; clicking elsewhere or pressing Escape closes just the app's menu. The Menu key or Shift+F10 opens it from the keyboard. A left click does what the click action setting says. Choose it under Overflow on the Behaviour page.
+
+### Changed
+- Submenus inside tray menus now inset their rows and round their corners, instead of laying them edge to edge as square blocks.
+
+### Fixed
+- Opening a submenu inside an app's menu in the Icon menu, such as a Mode submenu within an app's row, no longer throws an error and now highlights the submenu's row while it is open.
+
 ## [2.6] - 2026-10-13
 
 ### Changed

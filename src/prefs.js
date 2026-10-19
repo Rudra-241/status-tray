@@ -1933,11 +1933,11 @@ export default class StatusTrayPreferences extends ExtensionPreferences {
         overflowGroup.add(overflowEnabledRow);
 
         // ComboRow index ↔ stored value. Index order matches the model.
-        const overflowModeValues = ['menu', 'strip'];
+        const overflowModeValues = ['menu', 'strip', 'grid'];
         const overflowModeRow = new Adw.ComboRow({
             title: 'Mode',
-            subtitle: 'A popup menu, or a strip that slides out in the panel',
-            model: Gtk.StringList.new(['Icon menu', 'Icon strip']),
+            subtitle: 'A popup menu, a strip that slides out in the panel, or a popup grid',
+            model: Gtk.StringList.new(['Icon menu', 'Icon strip', 'Icon grid']),
             sensitive: overflowEnabledRow.get_active(),
         });
         overflowModeRow.set_selected(Math.max(0,
@@ -2023,6 +2023,7 @@ export default class StatusTrayPreferences extends ExtensionPreferences {
             overflowCustomRow.set_subtitle(value);
         };
 
+        // The icon menu and the icon grid both open from the overflow button.
         const isIconMenu = () => this._settings.get_string('overflow-mode') !== 'strip';
 
         const updateOverflowCustomVisibility = () => {
@@ -2062,7 +2063,8 @@ export default class StatusTrayPreferences extends ExtensionPreferences {
         });
         overflowGroup.add(overflowStripRow);
 
-        // The button icon only applies to the icon menu, the width to the strip.
+        // The button icon only applies to the icon menu and grid, the width to
+        // the strip.
         const updateOverflowModeRows = () => {
             overflowIconRow.set_visible(isIconMenu());
             overflowStripRow.set_visible(!isIconMenu());

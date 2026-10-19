@@ -28,3 +28,61 @@
 .status-tray-overflow-preview-icon {
     icon-size: 11px;
 }
+
+/* Icon grid overflow mode. The popup sizes to the grid, or to the app menu
+ * shown under it. */
+.popup-menu.status-tray-grid-menu {
+    min-width: 0;
+}
+
+.status-tray-grid {
+    padding: 4px;
+}
+
+.status-tray-grid-cell {
+    padding: 8px;
+    border-radius: 8px;
+}
+
+.status-tray-grid-cell:hover,
+.status-tray-grid-cell:focus {
+    background-color: rgba(127, 127, 127, 0.2);
+}
+
+.status-tray-grid-cell:checked,
+.status-tray-grid-cell:active {
+    background-color: rgba(127, 127, 127, 0.35);
+}
+
+/* Submenus in tray menus. GNOME lays a submenu's rows edge to edge with
+ * square corners, which in the overflow menu nests square blocks inside
+ * square blocks. Inset the rows and round them instead. The theme rounds the
+ * last row of a submenu with more specific selectors, so match those too. */
+.status-tray-menu .popup-sub-menu {
+    padding: 4px;
+}
+
+.status-tray-menu .popup-sub-menu .popup-menu-item,
+.status-tray-menu .popup-sub-menu .popup-menu-item:last-child,
+.status-tray-menu .popup-sub-menu .popup-menu-section .popup-menu-item:last-child:hover,
+.status-tray-menu .popup-sub-menu .popup-menu-section .popup-menu-item:last-child:focus,
+.status-tray-menu .popup-sub-menu .popup-menu-section:last-child .popup-menu-item:last-child {
+    border-radius: 8px;
+}
+
+/* An open submenu's row joins the submenu under it. */
+.status-tray-menu .popup-sub-menu .popup-menu-item:checked {
+    border-radius: 8px 8px 0 0 !important;
+}
+
+.status-tray-menu .popup-sub-menu .popup-sub-menu {
+    border-radius: 0 0 8px 8px;
+    margin-bottom: 4px;
+}
+
+/* An app's menu opened from the icon grid hangs from the pointer, so drop the
+ * arrow and the gap a panel menu leaves for it. */
+.status-tray-context-menu {
+    -arrow-rise: 0px;
+    -boxpointer-gap: 2px;
+}

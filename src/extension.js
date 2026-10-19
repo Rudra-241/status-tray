@@ -23,6 +23,7 @@ import Meta from 'gi://Meta';
 import Shell from 'gi://Shell';
 import St from 'gi://St';
 
+import * as BoxPointer from 'resource:///org/gnome/shell/ui/boxpointer.js';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
@@ -65,6 +66,10 @@ const OVERFLOW_PREVIEW_HALO_INSET = 2;
 // much of an icon slot peeks out, fading, at an edge with more icons past it.
 const STRIP_ANIMATION_TIME = 200;
 const STRIP_PEEK_FRACTION = 0.5;
+// Icon grid: how long the pointer rests on an icon before its name shows, and
+// the gap between the icon and the name.
+const GRID_TOOLTIP_DELAY_MS = 300;
+const GRID_TOOLTIP_GAP = 6;
 
 function debug(msg) {
     if (DEBUG) {
@@ -331,6 +336,8 @@ const TrayItem = GObject.registerClass({
         'appid-resolved': { param_types: [GObject.TYPE_STRING] },
         'display-changed': {},
         'passive-changed': {},
+        // An item of the app's menu was chosen, wherever the menu was shown.
+        'menu-item-activated': {},
     },
 }, class TrayItem extends PanelMenu.Button {
     _init(busName, objectPath, settings) {
@@ -375,6 +382,7 @@ const TrayItem = GObject.registerClass({
         this.add_child(this._icon);
 
         this.add_style_class_name('status-tray-button');
+        this.menu.actor.add_style_class_name('status-tray-menu');
         _applyIconPadding(this, this._settings);
 
         this._panelForeground = null;
@@ -1746,6 +1754,12 @@ const TrayItem = GObject.registerClass({
             // menu is itself nested (e.g. inside the overflow row's submenu),
             // closes the user's breadcrumb out from under them.
             subMenu._getTopMenu = () => targetMenu;
+            // Only a top-level PopupMenu does that tracking itself. A nested
+            // target (the overflow row's PopupSubMenu, the icon grid's
+            // PopupMenuSection) lacks _setOpenedSubMenu, so opening the
+            // submenu threw before it could mark its row open. Lend it the
+            // PopupMenu one, which only needs _openedSubMenu on `this`.
+            targetMenu._setOpenedSubMenu ??= PopupMenu.PopupMenu.prototype._setOpenedSubMenu;
 
             for (const childVariant of children) {
                 const child = childVariant.deep_unpack();
@@ -1889,6 +1903,7 @@ const TrayItem = GObject.registerClass({
 
     _activateMenuItem(itemId, label) {
         debug(`Activating menu item: ${label} (id=${itemId})`);
+        this.emit('menu-item-activated');
 
         const bus = Gio.DBus.session;
 
@@ -2080,6 +2095,7 @@ class OverflowButton extends PanelMenu.Button {
 
         this.add_style_class_name('status-tray-button');
         this.add_style_class_name('status-tray-overflow-button');
+        this.menu.actor.add_style_class_name('status-tray-menu');
         _applyIconPadding(this, this._settings);
 
         this.updateOverflowIcon();
@@ -2422,6 +2438,374 @@ class OverflowButton extends PanelMenu.Button {
         this._rows.clear();
         this._overflowedItems = [];
         this._iconActor = null;
+        super.destroy();
+    }
+});
+
+/**
+ * The 'grid' overflow mode: the overflow button's popup lays the overflowed
+ * tray icons out in a grid, like the Windows notification area. Resting the
+ * pointer on an icon names its app, a right click opens that app's menu in a
+ * popup of its own at the pointer, over the grid, and a left click does what
+ * the click-action setting says.
+ *
+ * The cells show copies of the TrayItems' icons; the TrayItems stay hidden in
+ * the panel as in the 'menu' mode, so the panel button, its icon styles and
+ * the row bookkeeping (_rows, _refreshRow) come from OverflowButton.
+ */
+const OverflowGridButton = GObject.registerClass(
+class OverflowGridButton extends OverflowButton {
+    _init(extensionPath, settings) {
+        super._init(extensionPath, settings);
+
+        this.menu.actor.add_style_class_name('status-tray-grid-menu');
+
+        this._grid = new St.Widget({
+            style_class: 'status-tray-grid',
+            x_align: Clutter.ActorAlign.CENTER,
+            layout_manager: new Clutter.GridLayout({
+                row_homogeneous: true,
+                column_homogeneous: true,
+            }),
+        });
+        this.menu.box.add_child(this._grid);
+
+        // App menus open from a point, as a desktop context menu does, so they
+        // hang off this invisible anchor, moved to the click before opening.
+        // A manager of their own takes a grab on top of the grid's: the grid
+        // stays open beneath, and a click outside an app menu or Escape
+        // closes just the app menu.
+        this._contextAnchor = new St.Widget({ width: 1, height: 1, opacity: 0 });
+        Main.uiGroup.add_child(this._contextAnchor);
+        this._contextManager = new PopupMenu.PopupMenuManager(this);
+        // One menu per app, kept while the app is in the grid, so a late
+        // reply for one app can't land in another's menu.
+        this._contextMenus = new Map();
+        // The TrayItem whose menu is open.
+        this._menuOwner = null;
+
+        this._tooltip = new St.Label({
+            style_class: 'dash-label status-tray-grid-tooltip',
+            visible: false,
+        });
+        Main.uiGroup.add_child(this._tooltip);
+        this._tooltipCell = null;
+        this._tooltipTimeoutId = 0;
+
+        this._clickTimeoutId = 0;
+
+        this.menu.connectObject('open-state-changed', (_menu, isOpen) => {
+            if (!isOpen) {
+                this._hideTooltip();
+                this._closeContextMenu();
+            }
+        }, this);
+    }
+
+    setOverflowedItems(trayItems) {
+        this._overflowedItems = trayItems;
+
+        for (const trayItem of this._rows.keys())
+            trayItem.disconnectObject(this);
+        this._rows.clear();
+        this._hideTooltip();
+        this._grid.destroy_all_children();
+
+        if (this._menuOwner && !trayItems.includes(this._menuOwner))
+            this._closeContextMenu();
+        for (const [trayItem, menu] of this._contextMenus) {
+            if (!trayItems.includes(trayItem)) {
+                menu.destroy();
+                this._contextMenus.delete(trayItem);
+            }
+        }
+
+        // As square as it gets, wider than tall when it can't be square.
+        const columns = Math.max(1, Math.ceil(Math.sqrt(trayItems.length)));
+        const layout = this._grid.layout_manager;
+        for (const [index, trayItem] of trayItems.entries()) {
+            const cell = this._buildCell(trayItem);
+            cell.checked = trayItem === this._menuOwner;
+            layout.attach(cell, index % columns, Math.floor(index / columns), 1, 1);
+            this._rows.set(trayItem, cell);
+
+            trayItem.connectObject(
+                'display-changed', () => this._refreshRow(trayItem),
+                // Choosing an item puts the whole tray away, as on Windows.
+                'menu-item-activated', () => {
+                    if (this._menuOwner === trayItem)
+                        this.menu.close();
+                }, this);
+        }
+
+        this.updateOverflowIcon();
+    }
+
+    _buildCell(trayItem) {
+        const cell = new St.Button({
+            style_class: 'status-tray-grid-cell',
+            can_focus: true,
+            track_hover: true,
+            button_mask: St.ButtonMask.ONE | St.ButtonMask.TWO | St.ButtonMask.THREE,
+            accessible_name: this._displayName(trayItem),
+            child: new St.Icon({ style_class: 'status-tray-icon' }),
+        });
+        this._applyRowIcon(cell, trayItem);
+
+        cell.connect('clicked', (_cell, button) => this._onCellClicked(trayItem, button));
+        cell.connect('notify::hover', () => {
+            if (cell.hover)
+                this._scheduleTooltip(cell, trayItem);
+            else if (this._tooltipCell === cell)
+                this._hideTooltip();
+        });
+        cell.connect('key-focus-in', () => this._scheduleTooltip(cell, trayItem));
+        cell.connect('key-focus-out', () => {
+            if (this._tooltipCell === cell)
+                this._hideTooltip();
+        });
+        // The Menu key, or Shift+F10, stands in for a right click.
+        cell.connect('key-press-event', (_cell, event) => {
+            const symbol = event.get_key_symbol();
+            const shift = event.get_state() & Clutter.ModifierType.SHIFT_MASK;
+            if (symbol === Clutter.KEY_Menu || (symbol === Clutter.KEY_F10 && shift)) {
+                this._openContextMenu(trayItem, true);
+                return Clutter.EVENT_STOP;
+            }
+            return Clutter.EVENT_PROPAGATE;
+        });
+        return cell;
+    }
+
+    _displayName(trayItem) {
+        return trayItem._computeDisplayName() || trayItem._appId || 'Unknown';
+    }
+
+    _onCellClicked(trayItem, button) {
+        this._hideTooltip();
+
+        if (button === Clutter.BUTTON_SECONDARY) {
+            this._clearClickTimeout();
+            this._openContextMenu(trayItem);
+            return;
+        }
+
+        if (button === Clutter.BUTTON_MIDDLE) {
+            this._clearClickTimeout();
+            this.menu.close();
+            trayItem._secondaryActivate();
+            return;
+        }
+
+        const mode = this._settings.get_string('click-action');
+        if (mode === 'menu') {
+            this._openContextMenu(trayItem);
+            return;
+        }
+        if (mode === 'activate') {
+            this._activate(trayItem);
+            return;
+        }
+
+        // 'activate-double', timed as on TrayItem. The menu opens where the
+        // pointer was when the timer started.
+        if (this._clickTimeoutId) {
+            this._clearClickTimeout();
+            this._activate(trayItem);
+        } else {
+            const [x, y] = global.get_pointer();
+            this._clickTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT,
+                DOUBLE_CLICK_INTERVAL_MS, () => {
+                    this._clickTimeoutId = 0;
+                    this._openContextMenu(trayItem, false, [x, y]);
+                    return GLib.SOURCE_REMOVE;
+                });
+        }
+    }
+
+    _clearClickTimeout() {
+        if (this._clickTimeoutId) {
+            GLib.source_remove(this._clickTimeoutId);
+            this._clickTimeoutId = 0;
+        }
+    }
+
+    // TrayItem._primaryActivate falls back to the TrayItem's own menu, which
+    // would open against an icon hidden in the panel, so fall back to the
+    // grid's app menu instead.
+    _activate(trayItem) {
+        const isMenu = trayItem._proxy?.get_cached_property('ItemIsMenu')?.deep_unpack() ?? false;
+        if (isMenu) {
+            this._openContextMenu(trayItem);
+            return;
+        }
+        this.menu.close();
+        trayItem._callSNIMethod('Activate', () => {
+            if (!this._rows.has(trayItem))
+                return;
+            this.menu.open();
+            this._openContextMenu(trayItem, true);
+        });
+    }
+
+    _getContextMenu(trayItem) {
+        let menu = this._contextMenus.get(trayItem);
+        if (menu)
+            return menu;
+
+        menu = new PopupMenu.PopupMenu(this._contextAnchor, 0, St.Side.TOP);
+        menu.actor.add_style_class_name('status-tray-menu');
+        menu.actor.add_style_class_name('status-tray-context-menu');
+        Main.uiGroup.add_child(menu.actor);
+        menu.actor.hide();
+        this._contextManager.addMenu(menu);
+
+        menu.connect('open-state-changed', (_menu, isOpen) => {
+            if (isOpen || this._menuOwner !== trayItem)
+                return;
+            this._rows.get(trayItem)?.set_checked(false);
+            this._menuOwner = null;
+        });
+
+        this._contextMenus.set(trayItem, menu);
+        return menu;
+    }
+
+    /**
+     * Opens the app's menu over the grid, hanging from `point`, the pointer
+     * by default. From the keyboard it hangs under the icon instead, and
+     * takes key focus.
+     */
+    _openContextMenu(trayItem, fromKeyboard = false, point = null) {
+        const cell = this._rows.get(trayItem);
+        if (!cell || !this.menu.isOpen)
+            return;
+
+        this._closeContextMenu();
+        this._hideTooltip();
+
+        if (fromKeyboard) {
+            const [x, y] = cell.get_transformed_position();
+            const [width, height] = cell.get_transformed_size();
+            point = [x + width / 2, y + height];
+        }
+        const [x, y] = point ?? global.get_pointer();
+        this._contextAnchor.set_position(Math.round(x), Math.round(y));
+        Main.uiGroup.set_child_above_sibling(this._contextAnchor, null);
+
+        const menu = this._getContextMenu(trayItem);
+        this._menuOwner = trayItem;
+        cell.checked = true;
+
+        // PopupMenu.open() won't open an empty menu; _loadMenu replaces this.
+        this._seedPlaceholder(menu);
+        Main.uiGroup.set_child_above_sibling(menu.actor, null);
+        menu.open(BoxPointer.PopupAnimation.FULL);
+        if (fromKeyboard)
+            menu.actor.navigate_focus(null, St.DirectionType.TAB_FORWARD, false);
+        trayItem._loadMenu(menu);
+    }
+
+    _closeContextMenu() {
+        if (!this._menuOwner)
+            return;
+        this._contextMenus.get(this._menuOwner)?.close(BoxPointer.PopupAnimation.FULL);
+    }
+
+    _scheduleTooltip(cell, trayItem) {
+        if (this._tooltipTimeoutId)
+            GLib.source_remove(this._tooltipTimeoutId);
+        // Once a name is showing, moving to the next icon swaps it at once.
+        const delay = this._tooltip.visible ? 0 : GRID_TOOLTIP_DELAY_MS;
+        this._tooltipTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, delay, () => {
+            this._tooltipTimeoutId = 0;
+            this._showTooltip(cell, trayItem);
+            return GLib.SOURCE_REMOVE;
+        });
+    }
+
+    _showTooltip(cell, trayItem) {
+        // An open app menu already says whose it is.
+        if (!this.menu.isOpen || this._menuOwner || !cell.get_stage())
+            return;
+
+        this._tooltipCell = cell;
+        this._tooltip.text = this._displayName(trayItem);
+
+        // Popup menus are added to uiGroup as they open, so raise the name
+        // above this one.
+        Main.uiGroup.set_child_above_sibling(this._tooltip, null);
+        const wasVisible = this._tooltip.visible;
+        this._tooltip.show();
+
+        const [x, y] = cell.get_transformed_position();
+        const [width, height] = cell.get_transformed_size();
+        const [, labelWidth] = this._tooltip.get_preferred_width(-1);
+        const [, labelHeight] = this._tooltip.get_preferred_height(-1);
+        const monitor = Main.layoutManager.findMonitorForActor(cell) ??
+            Main.layoutManager.primaryMonitor;
+
+        // Centred under the icon, or over it if that runs off the screen.
+        let labelX = Math.round(x + (width - labelWidth) / 2);
+        labelX = Math.max(monitor.x,
+            Math.min(labelX, monitor.x + monitor.width - labelWidth));
+        let labelY = Math.round(y + height + GRID_TOOLTIP_GAP);
+        if (labelY + labelHeight > monitor.y + monitor.height)
+            labelY = Math.round(y - labelHeight - GRID_TOOLTIP_GAP);
+        this._tooltip.set_position(labelX, labelY);
+
+        if (!wasVisible) {
+            this._tooltip.opacity = 0;
+            this._tooltip.ease({
+                opacity: 255,
+                duration: 100,
+                mode: Clutter.AnimationMode.EASE_OUT_QUAD,
+            });
+        }
+    }
+
+    _hideTooltip() {
+        if (this._tooltipTimeoutId) {
+            GLib.source_remove(this._tooltipTimeoutId);
+            this._tooltipTimeoutId = 0;
+        }
+        this._tooltipCell = null;
+        this._tooltip.remove_all_transitions();
+        this._tooltip.hide();
+    }
+
+    toggleMenuWithKeyFocus() {
+        this.menu.toggle();
+        if (this.menu.isOpen)
+            this._grid.navigate_focus(null, St.DirectionType.TAB_FORWARD, false);
+    }
+
+    _applyRowIcon(cell, trayItem) {
+        this._applyTrayItemIcon(cell.child, trayItem, this._settings.get_int('icon-size'));
+    }
+
+    _refreshRow(trayItem) {
+        const cell = this._rows.get(trayItem);
+        if (!cell)
+            return;
+        const name = this._displayName(trayItem);
+        cell.accessible_name = name;
+        this._applyRowIcon(cell, trayItem);
+        if (this._tooltipCell === cell)
+            this._tooltip.text = name;
+        this._scheduleIconUpdate();
+    }
+
+    destroy() {
+        this._clearClickTimeout();
+        this._hideTooltip();
+        this._tooltip.destroy();
+        this.menu.disconnectObject(this);
+        this._menuOwner = null;
+        for (const menu of this._contextMenus.values())
+            menu.destroy();
+        this._contextMenus.clear();
+        this._contextAnchor.destroy();
         super.destroy();
     }
 });
@@ -3896,7 +4280,8 @@ export default class StatusTrayExtension extends Extension {
      * Apply the "overflow" feature: when enabled and the number of tray items
      * exceeds the user's inline limit, the excess items are hidden in place
      * and an OverflowButton (anchored at the rightmost slot of our tray range)
-     * presents them as submenu rows. In the 'strip' overflow-mode they go to
+     * presents them as submenu rows, or as a grid of icons in the 'grid'
+     * overflow-mode (OverflowGridButton). In the 'strip' overflow-mode they go to
      * the icon strip instead (see _applyIconStrip). Safe to call at any time;
      * idempotent.
      */
@@ -3948,11 +4333,19 @@ export default class StatusTrayExtension extends Extension {
         const inline = entries.slice(0, inlineCount);
         const overflowed = entries.slice(inlineCount);
 
-        if (this._settings.get_string('overflow-mode') === 'strip') {
+        const mode = this._settings.get_string('overflow-mode');
+        if (mode === 'strip') {
             this._applyIconStrip(inline, overflowed, box, slotAfterManagedItems);
             return;
         }
         this._destroyIconStrip();
+
+        // 'menu' and 'grid' differ only in the button's popup, so switching
+        // between them swaps the button.
+        const wantGrid = mode === 'grid';
+        if (this._overflowButton &&
+            (this._overflowButton instanceof OverflowGridButton) !== wantGrid)
+            this._destroyOverflowButton();
 
         for (const trayItem of inline) {
             const container = trayItem.container;
@@ -3964,7 +4357,9 @@ export default class StatusTrayExtension extends Extension {
         }
 
         if (!this._overflowButton) {
-            this._overflowButton = new OverflowButton(this.path, this._settings);
+            this._overflowButton = wantGrid
+                ? new OverflowGridButton(this.path, this._settings)
+                : new OverflowButton(this.path, this._settings);
             const areaKey = this._freeStatusAreaKey('StatusTray-Overflow');
             this._overflowAreaKey = areaKey;
             Main.panel.addToStatusArea(areaKey, this._overflowButton, slotAfterManagedItems(), this._panelBoxName());
